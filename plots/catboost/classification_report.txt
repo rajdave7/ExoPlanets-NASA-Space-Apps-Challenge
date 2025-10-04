@@ -1,0 +1,18 @@
+Classification Report - CatBoost
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.83      0.81      0.82       968
+      Planet       0.81      0.83      0.82       945
+
+    accuracy                           0.82      1913
+   macro avg       0.82      0.82      0.82      1913
+weighted avg       0.82      0.82      0.82      1913
+
+
+Accuracy: 0.8217
+Precision: 0.8113
+Recall: 0.8328
+F1-Score: 0.8219
+ROC-AUC: 0.9119

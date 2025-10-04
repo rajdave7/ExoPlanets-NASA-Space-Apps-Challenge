@@ -1,0 +1,18 @@
+Classification Report - Gradient Boosting
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.85      0.81      0.83       968
+      Planet       0.81      0.85      0.83       945
+
+    accuracy                           0.83      1913
+   macro avg       0.83      0.83      0.83      1913
+weighted avg       0.83      0.83      0.83      1913
+
+
+Accuracy: 0.8285
+Precision: 0.8107
+Recall: 0.8519
+F1-Score: 0.8308
+ROC-AUC: 0.9084

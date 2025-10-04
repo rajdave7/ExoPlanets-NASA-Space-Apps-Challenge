@@ -1,0 +1,18 @@
+Classification Report - Decision Tree
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.78      0.77      0.77       968
+      Planet       0.76      0.77      0.77       945
+
+    accuracy                           0.77      1913
+   macro avg       0.77      0.77      0.77      1913
+weighted avg       0.77      0.77      0.77      1913
+
+
+Accuracy: 0.7695
+Precision: 0.7636
+Recall: 0.7725
+F1-Score: 0.7680
+ROC-AUC: 0.7695

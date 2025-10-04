@@ -1,0 +1,18 @@
+Classification Report - AdaBoost
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.83      0.73      0.78       968
+      Planet       0.75      0.84      0.80       945
+
+    accuracy                           0.79      1913
+   macro avg       0.79      0.79      0.79      1913
+weighted avg       0.79      0.79      0.79      1913
+
+
+Accuracy: 0.7878
+Precision: 0.7550
+Recall: 0.8444
+F1-Score: 0.7972
+ROC-AUC: 0.8817

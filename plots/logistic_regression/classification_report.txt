@@ -1,0 +1,18 @@
+Classification Report - Logistic Regression
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.79      0.43      0.55       968
+      Planet       0.60      0.88      0.71       945
+
+    accuracy                           0.65      1913
+   macro avg       0.69      0.65      0.63      1913
+weighted avg       0.70      0.65      0.63      1913
+
+
+Accuracy: 0.6519
+Precision: 0.6003
+Recall: 0.8836
+F1-Score: 0.7149
+ROC-AUC: 0.6577

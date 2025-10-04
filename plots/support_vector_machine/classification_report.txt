@@ -1,0 +1,18 @@
+Classification Report - Support Vector Machine
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.83      0.40      0.54       968
+      Planet       0.60      0.92      0.72       945
+
+    accuracy                           0.65      1913
+   macro avg       0.72      0.66      0.63      1913
+weighted avg       0.72      0.65      0.63      1913
+
+
+Accuracy: 0.6545
+Precision: 0.5977
+Recall: 0.9196
+F1-Score: 0.7245
+ROC-AUC: 0.7037

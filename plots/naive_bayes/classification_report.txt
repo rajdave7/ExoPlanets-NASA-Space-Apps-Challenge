@@ -1,0 +1,18 @@
+Classification Report - Naive Bayes
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.87      0.36      0.51       968
+      Planet       0.59      0.95      0.73       945
+
+    accuracy                           0.65      1913
+   macro avg       0.73      0.65      0.62      1913
+weighted avg       0.73      0.65      0.61      1913
+
+
+Accuracy: 0.6477
+Precision: 0.5892
+Recall: 0.9471
+F1-Score: 0.7265
+ROC-AUC: 0.6529

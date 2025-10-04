@@ -1,0 +1,18 @@
+Classification Report - Random Forest
+================================================================================
+
+              precision    recall  f1-score   support
+
+  Not Planet       0.83      0.83      0.83       968
+      Planet       0.82      0.83      0.83       945
+
+    accuracy                           0.83      1913
+   macro avg       0.83      0.83      0.83      1913
+weighted avg       0.83      0.83      0.83      1913
+
+
+Accuracy: 0.8280
+Precision: 0.8235
+Recall: 0.8296
+F1-Score: 0.8266
+ROC-AUC: 0.9078
