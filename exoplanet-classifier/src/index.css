@@ -1,13 +1,76 @@
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Clean, validated stylesheet.
+  No local custom fonts required — using Inter/system fonts as fallback.
+*/
+:root{
+  --accent: #7c3aed; /* violet accent */
+  /* Use Helvetica system stack for both UI and display as requested */
+  --ui-font: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --display-font: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+html, body, #root {
+  height: 100%;
 }
 
-code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+body {
+  @apply bg-black text-slate-100 antialiased;
+  font-family: var(--ui-font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* Layered background: subtle gradient overlay -> direct image URL -> svg fallback */
+  background-image:
+    linear-gradient(180deg, rgba(2,6,23,0.65), rgba(0,0,0,0.7)),
+    url('https://wallpapersinbox.wordpress.com/wp-content/uploads/2012/08/hd-space-7.jpg?w=4000&h='),
+    url('./assets/space-bg.svg');
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-position: center center, center center, center top;
+  background-size: cover, cover, auto;
+  background-attachment: fixed, fixed, scroll;
 }
+
+/* subtle animated starfield using svg fallback */
+.starfield, .App-root-starfield{
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: url('https://wallpapersinbox.wordpress.com/wp-content/uploads/2012/08/hd-space-7.jpg?w=4000&h='), url('./assets/space-bg.svg');
+  opacity: 0.65;
+  mix-blend-mode: screen;
+}
+
+/* small utility to create nebula glow panels */
+.nebula-panel{
+  background: linear-gradient(90deg, rgba(124,58,237,0.08), rgba(14,165,233,0.03));
+  border: 1px solid rgba(124,58,237,0.12);
+  box-shadow: 0 6px 24px rgba(2,6,23,0.6);
+}
+
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Courier New', monospace }
+
+/* Headings: sci-fi display font */
+h1,h2,h3,h4 { 
+  font-family: var(--display-font);
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+
+/* Subtle typographic scale */
+h1 { font-size: 2.25rem; line-height: 1.05 }
+h2 { font-size: 1.5rem; line-height: 1.15 }
+h3 { font-size: 1.125rem }
+
+/* Make buttons/controls slightly round and use UI font */
+.btn, button, .control {
+  font-family: var(--ui-font);
+  border-radius: 0.5rem;
+}
+
+/* Ensure app containers sit above the background layer */
+.app-content { position: relative; z-index: 10 }
+

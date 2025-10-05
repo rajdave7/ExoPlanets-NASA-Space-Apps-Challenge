@@ -1,7 +1,6 @@
 // app.js
 /* Defensive React import to avoid "useRef of null" bundler issues */
-import * as React from "react";
-
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { Upload, Database, Zap, RefreshCcw, Play } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -15,7 +14,6 @@ import {
   Cell,
   LabelList,
 } from "recharts";
-const { useEffect, useState, useRef, useCallback } = React;
 
 const API_URL = "http://localhost:8000";
 
@@ -47,6 +45,8 @@ export default function App() {
   const [batchPrediction, setBatchPrediction] = useState(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
+  // explanation may be unused in some flows; keep state but silence lint
+  // eslint-disable-next-line no-unused-vars
   const [explanation, setExplanation] = useState(null);
   const [ensembleInputs, setEnsembleInputs] = useState(
     Object.fromEntries(SELECTED_FEATURES.map((f) => [f, ""]))
@@ -583,12 +583,13 @@ export default function App() {
   // UI (kept consistent with your previous layout)
   // -------------------------
   return (
-    <div className="min-h-screen bg-[radial-gradient(ellipse_at_bottom_right,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-black text-white">
-      <div className="max-w-6xl mx-auto py-8 px-4">
+    <div className="min-h-screen text-white">
+      <div className="starfield" aria-hidden="true" />
+      <div className="app-content max-w-6xl mx-auto py-8 px-4">
         <header className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-4xl font-extrabold tracking-tight">
-              🪐 Exoplanet Classifier
+              Exoplanet Classifier
             </h1>
             <p className="text-slate-400 mt-1">
               Predict KOIs, train models, and try the one-click demo —
