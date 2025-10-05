@@ -13,6 +13,7 @@ import {
   CartesianGrid,
   Legend,
   Cell,
+  LabelList,
 } from "recharts";
 const { useEffect, useState, useRef, useCallback } = React;
 
@@ -39,6 +40,7 @@ const DEMO_CSV = `koi_period,koi_duration,koi_prad,koi_depth,koi_model_snr
 export default function App() {
   const [activeTab, setActiveTab] = useState("predict");
   const [modelStatus, setModelStatus] = useState(null);
+  // featureImportance stores objects { feature: string, signed: number }
   const [featureImportance, setFeatureImportance] = useState([]);
   const [prediction, setPrediction] = useState(null); // single ensemble
   const [predictionCat, setPredictionCat] = useState(null); // single catboost
@@ -101,7 +103,7 @@ export default function App() {
   // Load initial state
   useEffect(() => {
     fetchModelStatus();
-    loadFeatureImportance();
+    loadFeatureImportanceFromBackend();
     loadEvalMetrics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -116,8 +118,8 @@ export default function App() {
     }
   };
 
-  // load feature importance from backend (RandomForest / saved importance)
-  const loadFeatureImportance = useCallback(async () => {
+  // load feature importance from backend (RandomForest / saved importance) as fallback/initial
+  const loadFeatureImportanceFromBackend = useCallback(async () => {
     try {
       const res = await fetch(`${API_URL}/api/feature-importance`);
       const data = await safeJson(res);
@@ -126,17 +128,33 @@ export default function App() {
         const cleaned = data.feature_importance
           .map((d) => ({
             feature: String(d.feature),
-            importance: Number(d.importance) || 0,
+            signed: Number(d.importance) || 0,
           }))
-          .filter((d) => Number.isFinite(d.importance))
+          .filter((d) => Number.isFinite(d.signed))
+          .sort((a, b) => Math.abs(b.signed) - Math.abs(a.signed))
           .slice(0, 50);
-        setFeatureImportance(cleaned);
+        // If backend FI doesn't include our five features, ensure they appear (with 0)
+        const byName = Object.fromEntries(
+          cleaned.map((c) => [c.feature, c.signed])
+        );
+        const final = SELECTED_FEATURES.map((f) => ({
+          feature: f,
+          signed: Number.isFinite(byName[f]) ? byName[f] : 0,
+        })).concat(
+          cleaned.filter((c) => !SELECTED_FEATURES.includes(c.feature))
+        );
+        setFeatureImportance(final.slice(0, 50));
       } else {
-        setFeatureImportance([]);
+        // default to zeroed SELECTED_FEATURES so charts render
+        setFeatureImportance(
+          SELECTED_FEATURES.map((f) => ({ feature: f, signed: 0 }))
+        );
       }
     } catch (err) {
       console.warn("feature importance load failed:", err);
-      setFeatureImportance([]);
+      setFeatureImportance(
+        SELECTED_FEATURES.map((f) => ({ feature: f, signed: 0 }))
+      );
     }
   }, []);
 
@@ -154,7 +172,8 @@ export default function App() {
   }, []);
 
   // -------------------------
-  // Explanation helper (updates featureImportance on each predict)
+  // Explanation helper (updates featureImportance using SHAP directly)
+  //  FIX: Always map backend SHAP into the five SELECTED_FEATURES (signed), guaranteeing UI updates.
   // -------------------------
   const fetchExplanation = async (payload) => {
     try {
@@ -171,23 +190,68 @@ export default function App() {
 
       setExplanation(data);
 
-      // IMPORTANT: if backend returns shap list, update featureImportance chart immediately
-      // Expecting data.shap like [{feature: 'koi_period', value: 0.123}, ...]
-      if (Array.isArray(data.shap) && data.shap.length > 0) {
+      // Build feature->value map from backend SHAP (supports multiple naming conventions)
+      const shapMap = {};
+      if (Array.isArray(data.shap)) {
+        data.shap.forEach((s) => {
+          try {
+            const feat = String(s.feature ?? s.name ?? s[0] ?? "").trim();
+            const val = Number(
+              s.value ??
+                s.shap_value ??
+                s.coef ??
+                (Array.isArray(s) ? Number(s[1]) : NaN)
+            );
+            if (feat) {
+              shapMap[feat] = Number.isFinite(val) ? val : 0;
+            }
+          } catch (e) {
+            // ignore malformed entry
+          }
+        });
+      }
+
+      // Create a deterministic featureImportance array for the 5 manual features (guaranteed new object)
+      const fiForFive = SELECTED_FEATURES.map((f) => ({
+        feature: f,
+        signed: Number.isFinite(shapMap[f]) ? shapMap[f] : 0,
+      }));
+
+      // If backend returned other features too, append top N of them for fuller chart (optional)
+      let appended = [];
+      if (Array.isArray(data.shap)) {
         try {
-          const fi = data.shap
-            .map((s) => ({
-              feature: String(s.feature),
-              importance: Math.abs(Number(s.value) || 0),
-              signed: Number(s.value) || 0,
-            }))
-            .sort((a, b) => b.importance - a.importance)
-            .slice(0, 50);
-          setFeatureImportance(fi);
+          // convert any additional features into list, exclude the five already included
+          const extras = data.shap
+            .map((s) => {
+              const feat = String(s.feature ?? s.name ?? s[0] ?? "").trim();
+              const val = Number(
+                s.value ??
+                  s.shap_value ??
+                  s.coef ??
+                  (Array.isArray(s) ? Number(s[1]) : NaN)
+              );
+              return { feature: feat, signed: Number.isFinite(val) ? val : 0 };
+            })
+            .filter((x) => x.feature && !SELECTED_FEATURES.includes(x.feature));
+          // sort by abs importance and take some top extras (but limited so UI doesn't explode)
+          appended = extras
+            .sort((a, b) => Math.abs(b.signed) - Math.abs(a.signed))
+            .slice(0, 45);
         } catch (e) {
-          console.warn("failed to convert shap to featureImportance:", e);
+          appended = [];
         }
       }
+
+      const finalFI = [...fiForFive, ...appended].slice(0, 50);
+
+      // Force update to state with a brand new array object
+      setFeatureImportance(
+        finalFI.map((x) => ({
+          feature: String(x.feature),
+          signed: Number(x.signed),
+        }))
+      );
 
       return data;
     } catch (err) {
@@ -198,14 +262,14 @@ export default function App() {
   };
 
   // -------------------------
-  // Predict flows
+  // Predict flows — now uses SHAP directly (no backend FI overwrite)
   // -------------------------
   const handlePredict = async () => {
     setLoading(true);
     setExplanation(null);
     try {
+      const payload = { features: {} };
       if (selectedPredictModel === "CatBoost") {
-        const payload = { features: {} };
         SELECTED_FEATURES.forEach((k) => {
           const v = catboostInputs[k];
           payload.features[k] = v === "" || v === undefined ? 0.0 : Number(v);
@@ -225,9 +289,7 @@ export default function App() {
         });
         setPrediction(null);
         showMsg("success", "CatBoost prediction returned");
-        await fetchExplanation(payload);
       } else {
-        const payload = { features: {} };
         SELECTED_FEATURES.forEach((k) => {
           const v = ensembleInputs[k];
           payload.features[k] = v === "" || v === undefined ? 0.0 : Number(v);
@@ -248,12 +310,13 @@ export default function App() {
         });
         setPredictionCat(null);
         showMsg("success", "Ensemble prediction returned");
-        await fetchExplanation(payload);
       }
 
-      // also refresh backend-stored FI/metrics (non-destructive) in background
-      loadFeatureImportance();
-      loadEvalMetrics();
+      // CRITICAL: fetch SHAP explanation and use it directly for the charts (we now map to 5 features)
+      await fetchExplanation(payload);
+
+      // refresh eval metrics only
+      await loadEvalMetrics();
     } catch (err) {
       console.error(err);
       showMsg("error", err.message || "Prediction failed");
@@ -314,7 +377,8 @@ export default function App() {
         });
         showMsg("success", "Training completed");
         await fetchModelStatus();
-        await loadFeatureImportance();
+        // refresh backend importance but only as fallback (won't overwrite existing SHAP unless you refresh)
+        await loadFeatureImportanceFromBackend();
         await loadEvalMetrics();
       } else if (endpoint === "/api/train-catboost") {
         setTrainingResult({
@@ -325,7 +389,7 @@ export default function App() {
         });
         showMsg("success", "CatBoost training completed");
         await fetchModelStatus();
-        await loadFeatureImportance();
+        await loadFeatureImportanceFromBackend();
         await loadEvalMetrics();
       }
     } catch (err) {
@@ -382,7 +446,7 @@ export default function App() {
 
       showMsg("success", `${modelName} retrained`);
       await fetchModelStatus();
-      await loadFeatureImportance();
+      await loadFeatureImportanceFromBackend();
       await loadEvalMetrics();
     } catch (err) {
       console.error("Retrain error:", err);
@@ -393,7 +457,7 @@ export default function App() {
   };
 
   // -------------------------
-  // Charts components (Recharts)
+  // Charts components (Recharts) - now plot signed SHAP values
   // -------------------------
   const MiniFeatureChart = ({ data }) => {
     const top = (data || []).slice(0, 6);
@@ -410,22 +474,25 @@ export default function App() {
             margin={{ top: 6, right: 12, left: 12, bottom: 6 }}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="#263238" />
-            <XAxis type="number" hide />
+            <XAxis type="number" domain={["dataMin - 0.1", "dataMax + 0.1"]} />
             <YAxis
               dataKey="feature"
               type="category"
               width={120}
-              axisLine={false}
               tick={{ fill: "#cbd5e1", fontSize: 12 }}
             />
-            <Tooltip wrapperStyle={{ color: "#000" }} />
-            <Bar dataKey="importance">
-              {top.map((entry, idx) => (
-                <Cell
-                  key={`cell-${idx}`}
-                  fill={idx === 0 ? "#60a5fa" : "#93c5fd"}
-                />
-              ))}
+            <Tooltip formatter={(val) => Number(val).toFixed(4)} />
+            <Bar dataKey="signed">
+              {top.map((entry, idx) => {
+                const signed = Number(entry.signed || 0);
+                const fill = signed >= 0 ? "#4ade80" : "#fb7185";
+                return <Cell key={`cell-${idx}`} fill={fill} />;
+              })}
+              <LabelList
+                dataKey="signed"
+                position="right"
+                formatter={(v) => Number(v).toFixed(4)}
+              />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -436,11 +503,11 @@ export default function App() {
   const FullFeatureChart = ({ data }) => {
     const top = (data || [])
       .slice(0, 20)
-      .map((d) => ({ ...d, importance: Number(d.importance) }));
+      .map((d) => ({ ...d, signed: Number(d.signed) }));
     if (!top.length) {
       return (
         <div className="text-sm text-amber-300">
-          No feature importance available. Train the model to see importance.
+          No feature importance available. Train or explain to see values.
         </div>
       );
     }
@@ -453,16 +520,27 @@ export default function App() {
             margin={{ top: 10, right: 12, left: 12, bottom: 10 }}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="#263238" />
-            <XAxis type="number" tick={{ fill: "#cbd5e1" }} />
+            <XAxis type="number" />
             <YAxis
               dataKey="feature"
               type="category"
               width={160}
               tick={{ fill: "#cbd5e1" }}
             />
-            <Tooltip />
+            <Tooltip formatter={(val) => Number(val).toFixed(4)} />
             <Legend />
-            <Bar dataKey="importance" fill="#7c3aed" />
+            <Bar dataKey="signed">
+              {top.map((entry, idx) => {
+                const signed = Number(entry.signed || 0);
+                const fill = signed >= 0 ? "#60a5fa" : "#fb7185";
+                return <Cell key={`cell-${idx}`} fill={fill} />;
+              })}
+              <LabelList
+                dataKey="signed"
+                position="right"
+                formatter={(v) => Number(v).toFixed(4)}
+              />
+            </Bar>
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -502,7 +580,7 @@ export default function App() {
   };
 
   // -------------------------
-  // UI
+  // UI (kept consistent with your previous layout)
   // -------------------------
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_bottom_right,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-black text-white">
@@ -513,7 +591,8 @@ export default function App() {
               🪐 Exoplanet Classifier
             </h1>
             <p className="text-slate-400 mt-1">
-              Predict KOIs, train models, and try the one-click demo.
+              Predict KOIs, train models, and try the one-click demo —
+              SHAP-driven charts update live.
             </p>
           </div>
           <div className="text-sm text-slate-400 text-right">
@@ -706,11 +785,28 @@ export default function App() {
 
                 <div className="mt-2">
                   <div className="text-sm text-slate-300">
-                    Feature importance (top features) — updates on every predict
+                    Feature importance (signed SHAP values) — updates on every
+                    predict
                   </div>
                   <div className="mt-2 bg-slate-900/20 p-2 rounded">
                     <MiniFeatureChart data={featureImportance} />
                   </div>
+                  {explanation?.eli5_short ? (
+                    <div className="mt-3 p-3 bg-slate-900/20 rounded text-sm text-slate-200">
+                      <div className="font-semibold mb-1">Explanation</div>
+                      <div>{explanation.eli5_short}</div>
+                    </div>
+                  ) : explanation?.eli5 ? (
+                    // fallback: attempt to strip probability if backend didn't provide eli5_short
+                    <div className="mt-3 p-3 bg-slate-900/20 rounded text-sm text-slate-200">
+                      <div className="font-semibold mb-1">Explanation</div>
+                      <div>
+                        {(explanation.eli5 || "")
+                          .replace(/\(prob\s*[\d.]+\)/, "")
+                          .trim()}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="mt-2">
@@ -949,7 +1045,7 @@ export default function App() {
               <div className="flex gap-2">
                 <button
                   onClick={() => {
-                    loadFeatureImportance();
+                    loadFeatureImportanceFromBackend();
                     fetchModelStatus();
                     loadEvalMetrics();
                   }}
@@ -984,7 +1080,7 @@ export default function App() {
             <div className="grid md:grid-cols-2 gap-4">
               <div className="bg-slate-800/60 p-4 rounded border border-slate-700">
                 <h4 className="font-semibold mb-2">
-                  Feature Importance (RandomForest / SHAP)
+                  Feature Importance (signed SHAP)
                 </h4>
                 <FullFeatureChart data={featureImportance} />
               </div>

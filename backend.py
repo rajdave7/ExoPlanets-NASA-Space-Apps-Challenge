@@ -5,7 +5,7 @@ FastAPI Backend for Exoplanet Classification (UPDATED)
 - Master dataset accumulation (uploaded_data/master_dataset.csv)
 - Generalized detection of disposition/status columns
 - /api/train appends uploaded CSV to master_dataset.csv (default) and re-trains ensemble + CatBoost
-- Added /api/explain endpoint (SHAP + simple ELI5)
+- Added /api/explain endpoint (SHAP + simple ELI5) - FIXED preprocessing for explain
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
@@ -979,16 +979,16 @@ def get_feature_importance():
     return {"feature_importance": feature_importance[:20]}
 
 
-# ---------- NEW: /api/explain endpoint (SHAP + ELI5) ----------
-# ---------- FIXED: /api/explain endpoint (robust to nested lists/arrays) ----------
+# ---------- NEW/REPLACEMENT: /api/explain endpoint (SHAP + ELI5) ----------
 @app.post("/api/explain")
 async def explain(data: PredictionInput):
     """
     Returns SHAP explanations (top 5) for a single-row prediction.
-    Robust handling for different shapes returned by predict_proba and shap.
+    Uses the same preprocessing pipeline as /api/predict so probabilities and SHAP
+    are consistent with prediction outputs. Returns both a full 'eli5' (with prob)
+    and 'eli5_short' (no probability) for UI display.
     """
     try:
-        # lazy import shap to avoid module import issues if not installed
         try:
             import shap
         except Exception:
@@ -1005,16 +1005,15 @@ async def explain(data: PredictionInput):
                 arr = np.asarray(x)
                 if arr.size == 0:
                     raise ValueError("empty array")
-                # prefer the single scalar if available
                 if arr.size == 1:
                     return float(arr.item())
-                # otherwise, if it's a 1-D array with multiple entries, return the first numeric entry
                 return float(arr.flatten()[0])
             except Exception:
-                # as a last resort, try cast directly and let the caller handle exceptions
                 return float(x)
 
-        def make_eli5(pred_label: str, prob: float, top_feats: List[Dict[str, float]]):
+        def make_eli5_full(
+            pred_label: str, prob: float, top_feats: List[Dict[str, float]]
+        ):
             if not top_feats:
                 return f"Model predicted {pred_label} with probability {prob:.2f}."
             top_names = [f["feature"] for f in top_feats[:2]]
@@ -1022,25 +1021,52 @@ async def explain(data: PredictionInput):
             for f in top_feats[:2]:
                 sign = "increases" if f["value"] > 0 else "decreases"
                 directions.append(f"{f['feature']} {sign} the chance")
-            # keep it very short and readable
             return (
                 f"The model predicted {pred_label} (prob {prob:.2f}). "
                 f"The strongest influences were {', '.join(top_names)}. "
                 f"In short: {directions[0]} and {directions[1]}."
             )
 
-        # prefer RandomForest for SHAP explanations if available
+        def make_eli5_short(pred_label: str, top_feats: List[Dict[str, float]]):
+            if not top_feats:
+                return f"The model predicted {pred_label}."
+            top_names = [f["feature"] for f in top_feats[:2]]
+            directions = []
+            for f in top_feats[:2]:
+                sign = "increases" if f["value"] > 0 else "decreases"
+                directions.append(f"{f['feature']} {sign} the chance")
+            return (
+                f"The model predicted {pred_label}. "
+                f"The strongest influences were {', '.join(top_names)}. "
+                f"In short: {directions[0]} and {directions[1]}."
+            )
+
+        # Prefer RandomForest for SHAP explanations if available
         rf = model_store.models.get("RandomForest")
         if rf is not None:
-            features = model_store.feature_names or []
-            # ensure expected features exist in incoming df
-            for feat in features:
-                if feat not in df.columns:
-                    df[feat] = 0.0
-            X = df[features]
+            # Ensure preprocessing artifacts exist
+            if (
+                model_store.imputer is None
+                or model_store.scaler is None
+                or not model_store.feature_names
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Model preprocessing artifacts missing. Train models first.",
+                )
 
-            proba_raw = rf.predict_proba(X)[0]  # may be ndarray or list-like
-            # coerce to flat row and extract planet prob robustly
+            # Use same preprocessing as /api/predict to get scaled features
+            X_scaled_df, _ = preprocess_data(df, is_training=False)
+
+            # Use the scaled features for prediction + SHAP so outputs match /api/predict
+            try:
+                proba_raw = rf.predict_proba(X_scaled_df)[0]
+            except Exception as e:
+                # if RF predict_proba fails, raise a meaningful error
+                raise HTTPException(
+                    status_code=400, detail=f"RF predict_proba failed: {e}"
+                )
+
             proba_arr = np.asarray(proba_raw).flatten()
             planet_prob = (
                 to_scalar(proba_arr[1])
@@ -1048,23 +1074,19 @@ async def explain(data: PredictionInput):
                 else to_scalar(proba_arr[0])
             )
 
-            pred_raw = rf.predict(X)[0]
+            pred_raw = rf.predict(X_scaled_df)[0]
             pred = int(np.asarray(pred_raw).item())
 
             explainer = shap.TreeExplainer(rf)
-            raw_shap = explainer.shap_values(X)
+            raw_shap = explainer.shap_values(X_scaled_df)
 
-            # raw_shap may be:
-            #  - an array shaped (n_samples, n_features)
-            #  - a list of arrays (per-class) e.g. [class0_shap, class1_shap]
             if isinstance(raw_shap, list):
-                # prefer class 1 explanations if available, else use first
                 shap_for_pos = raw_shap[1] if len(raw_shap) > 1 else raw_shap[0]
             else:
                 shap_for_pos = raw_shap
 
-            # shap_for_pos[0] should be the vector for the first (and only) sample
             shap_row = np.asarray(shap_for_pos[0]).flatten()
+            features = model_store.feature_names or []
             shap_list = []
             for f, v in zip(features, shap_row):
                 try:
@@ -1074,7 +1096,11 @@ async def explain(data: PredictionInput):
                 shap_list.append({"feature": f, "value": float(val)})
 
             top5 = sorted(shap_list, key=lambda x: abs(x["value"]), reverse=True)[:5]
-            eli5 = make_eli5("PLANET" if pred == 1 else "NOT_PLANET", planet_prob, top5)
+            eli5_full = make_eli5_full(
+                "PLANET" if pred == 1 else "NOT_PLANET", planet_prob, top5
+            )
+            eli5_short = make_eli5_short("PLANET" if pred == 1 else "NOT_PLANET", top5)
+
             return {
                 "prediction": "PLANET" if pred == 1 else "NOT_PLANET",
                 "probabilities": {
@@ -1082,10 +1108,11 @@ async def explain(data: PredictionInput):
                     "not_planet": float(to_scalar(proba_arr[0])),
                 },
                 "shap": top5,
-                "eli5": eli5,
+                "eli5": eli5_full,
+                "eli5_short": eli5_short,
             }
 
-        # fallback to CatBoost detector
+        # Fallback to CatBoost detector (it already handles its own scaling)
         detector = model_store.catboost_detector
         if detector is not None and detector.model is not None:
             feats = detector.feature_names
@@ -1122,8 +1149,11 @@ async def explain(data: PredictionInput):
                 shap_list.append({"feature": f, "value": float(val)})
 
             top5 = sorted(shap_list, key=lambda x: abs(x["value"]), reverse=True)[:5]
-            eli5 = make_eli5(
+            eli5_full = make_eli5_full(
                 "EXOPLANET" if pred == 1 else "FALSE_POSITIVE", planet_prob, top5
+            )
+            eli5_short = make_eli5_short(
+                "EXOPLANET" if pred == 1 else "FALSE_POSITIVE", top5
             )
             return {
                 "prediction": "EXOPLANET" if pred == 1 else "FALSE_POSITIVE",
@@ -1132,13 +1162,15 @@ async def explain(data: PredictionInput):
                     "not_planet": float(to_scalar(proba_arr[0])),
                 },
                 "shap": top5,
-                "eli5": eli5,
+                "eli5": eli5_full,
+                "eli5_short": eli5_short,
             }
 
         raise HTTPException(
             status_code=400,
             detail="No suitable model available for explanation. Train models first.",
         )
+
     except HTTPException:
         raise
     except Exception as e:
