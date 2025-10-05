@@ -1,45 +1,37 @@
 // app.js
 import React, { useEffect, useState } from "react";
-import {
-  Upload,
-  Activity,
-  Settings,
-  BarChart3,
-  Database,
-  Zap,
-  TrendingUp,
-  FileText,
-} from "lucide-react";
+import { Upload, Database, Zap } from "lucide-react";
 
 const API_URL = "http://localhost:8000";
+
+// Only these five features will be used for manual predict
+const SELECTED_FEATURES = [
+  "koi_period",
+  "koi_duration",
+  "koi_prad",
+  "koi_depth",
+  "koi_model_snr",
+];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState("predict");
   const [modelStatus, setModelStatus] = useState(null);
-  const [statistics, setStatistics] = useState(null);
+  const [catboostStatus, setCatboostStatus] = useState(null);
   const [prediction, setPrediction] = useState(null);
   const [predictionCat, setPredictionCat] = useState(null);
   const [loading, setLoading] = useState(false);
   const [trainingResult, setTrainingResult] = useState(null);
   const [message, setMessage] = useState(null);
-  const [retrainLoading, setRetrainLoading] = useState({});
-  const [retrainResults, setRetrainResults] = useState({});
-  const [appendToMaster, setAppendToMaster] = useState(true);
 
-  const [manualInput, setManualInput] = useState({
-    koi_period: "",
-    koi_duration: "",
-    koi_depth: "",
-    koi_prad: "",
-    koi_teq: "",
-    koi_insol: "",
-    koi_model_snr: "",
-    koi_steff: "",
-    koi_slogg: "",
-    koi_srad: "",
-  });
+  const [ensembleInputs, setEnsembleInputs] = useState(
+    Object.fromEntries(SELECTED_FEATURES.map((f) => [f, ""]))
+  );
+  const [catboostInputs, setCatboostInputs] = useState(
+    Object.fromEntries(SELECTED_FEATURES.map((f) => [f, ""]))
+  );
 
   const [selectedPredictModel, setSelectedPredictModel] = useState("Ensemble");
+  const [appendToMaster, setAppendToMaster] = useState(true);
 
   const [hyperparameters, setHyperparameters] = useState({
     HistGradientBoosting: { max_iter: 100, learning_rate: 0.1, max_depth: 10 },
@@ -50,7 +42,8 @@ export default function App() {
 
   useEffect(() => {
     fetchModelStatus();
-    fetchStatistics();
+    fetchCatBoostStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const safeJson = async (res) => {
@@ -68,17 +61,17 @@ export default function App() {
       const data = await safeJson(res);
       setModelStatus(data);
     } catch (err) {
-      console.error("fetchModelStatus error", err);
+      console.error("fetchModelStatus error:", err);
     }
   }
 
-  async function fetchStatistics() {
+  async function fetchCatBoostStatus() {
     try {
-      const res = await fetch(`${API_URL}/api/statistics`);
+      const res = await fetch(`${API_URL}/api/catboost-status`);
       const data = await safeJson(res);
-      setStatistics(data);
+      setCatboostStatus(data);
     } catch (err) {
-      console.error("fetchStatistics error", err);
+      console.error("fetchCatBoostStatus error:", err);
     }
   }
 
@@ -88,113 +81,63 @@ export default function App() {
     return `${(n * 100).toFixed(2)}%`;
   };
 
-  const renderRetrainMetrics = (res) => {
-    if (!res || !res.metrics) return null;
-    const metrics = res.metrics;
-
-    const flatKeys = ["accuracy", "precision", "recall", "f1_score", "roc_auc"];
-    const isFlat =
-      flatKeys.some((k) => Object.prototype.hasOwnProperty.call(metrics, k)) &&
-      Object.values(metrics).some((v) => typeof v === "number");
-
-    if (isFlat) {
-      return (
-        <div className="mt-2 p-2 bg-gray-50 rounded">
-          <p className="text-sm font-medium">Latest Retrain Metrics:</p>
-          <div className="text-xs mt-1">
-            <div className="font-semibold">{res.model ?? "Model"}</div>
-            <div className="flex gap-3 text-gray-700 mt-1">
-              <span>Acc: {formatPct(metrics.accuracy)}</span>
-              <span>F1: {formatPct(metrics.f1_score)}</span>
-              <span>ROC: {formatPct(metrics.roc_auc)}</span>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="mt-2 p-2 bg-gray-50 rounded">
-        <p className="text-sm font-medium">Latest Retrain Metrics:</p>
-        <div className="text-xs mt-1 space-y-2">
-          {Object.entries(metrics).map(([modelKey, m]) => (
-            <div key={modelKey}>
-              <div className="font-semibold">{modelKey}</div>
-              <div className="flex gap-3 text-gray-700">
-                <span>Acc: {formatPct(m.accuracy)}</span>
-                <span>F1: {formatPct(m.f1_score)}</span>
-                <span>ROC: {formatPct(m.roc_auc)}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
+  const showMsg = (type, text) => {
+    setMessage({ type, text });
+    setTimeout(() => setMessage(null), 6000);
   };
+
+  // ----- Handlers -----
 
   const handlePredict = async () => {
     setLoading(true);
-    setPrediction(null);
-    setPredictionCat(null);
-    setMessage(null);
-
-    const features = {};
-    Object.keys(manualInput).forEach((k) => {
-      if (manualInput[k] !== "") {
-        const v = parseFloat(manualInput[k]);
-        if (!Number.isNaN(v)) features[k] = v;
-      }
-    });
-
-    if (Object.keys(features).length === 0) {
-      setMessage({
-        type: "error",
-        text: "Please enter at least one numeric feature.",
-      });
-      setLoading(false);
-      return;
-    }
-
     try {
       if (selectedPredictModel === "CatBoost") {
+        const payload = { features: {} };
+        SELECTED_FEATURES.forEach((k) => {
+          const v = catboostInputs[k];
+          payload.features[k] = v === "" || v === undefined ? 0.0 : Number(v);
+        });
+
         const res = await fetch(`${API_URL}/api/predict-catboost`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ features }),
+          body: JSON.stringify(payload),
         });
         const data = await safeJson(res);
-        if (!res.ok) {
-          const err =
-            data?.detail || data?.error || data?.raw || JSON.stringify(data);
-          setMessage({
-            type: "error",
-            text: `CatBoost prediction failed: ${err}`,
-          });
-        } else {
-          setPredictionCat(data);
-          setMessage({ type: "success", text: "CatBoost prediction complete" });
-        }
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        setPredictionCat({
+          prediction: data.prediction,
+          probability_exoplanet: data.probability_exoplanet,
+          probability_false_positive: data.probability_false_positive,
+        });
+        setPrediction(null);
+        showMsg("success", "CatBoost prediction returned");
       } else {
+        const payload = { features: {} };
+        SELECTED_FEATURES.forEach((k) => {
+          const v = ensembleInputs[k];
+          payload.features[k] = v === "" || v === undefined ? 0.0 : Number(v);
+        });
+
         const res = await fetch(`${API_URL}/api/predict`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ features }),
+          body: JSON.stringify(payload),
         });
         const data = await safeJson(res);
-        if (!res.ok) {
-          const err =
-            data?.detail || data?.error || data?.raw || JSON.stringify(data);
-          setMessage({
-            type: "error",
-            text: `Ensemble prediction failed: ${err}`,
-          });
-        } else {
-          setPrediction(data);
-          setMessage({ type: "success", text: "Ensemble prediction complete" });
-        }
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        setPrediction({
+          prediction: data.prediction,
+          probability_planet: data.probability_planet,
+          probability_not_planet: data.probability_not_planet,
+          individual_predictions: data.individual_predictions,
+        });
+        setPredictionCat(null);
+        showMsg("success", "Ensemble prediction returned");
       }
     } catch (err) {
-      setMessage({ type: "error", text: "Network error during prediction" });
+      console.error(err);
+      showMsg("error", err.message || "Prediction failed");
     } finally {
       setLoading(false);
     }
@@ -202,573 +145,563 @@ export default function App() {
 
   const handleFileUpload = async (file, endpoint) => {
     setLoading(true);
-    setMessage(null);
-
-    const formData = new FormData();
-    formData.append("file", file);
-    // include the hyperparameters JSON so /api/train will get CatBoost too
-    if (endpoint === "/api/train") {
-      formData.append("hyperparameters", JSON.stringify(hyperparameters));
-      formData.append("append", appendToMaster ? "true" : "false");
-    }
-
     try {
+      const form = new FormData();
+      form.append("file", file);
+      if (endpoint === "/api/train" || endpoint === "/api/train-catboost") {
+        form.append("append", appendToMaster ? "true" : "false");
+        form.append("hyperparameters", JSON.stringify(hyperparameters || {}));
+      }
+
       const res = await fetch(`${API_URL}${endpoint}`, {
         method: "POST",
-        body: formData,
+        body: form,
       });
       const data = await safeJson(res);
-      if (!res.ok) {
-        const err =
-          data?.detail || data?.error || data?.raw || JSON.stringify(data);
-        setMessage({ type: "error", text: `Upload failed: ${err}` });
+      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+
+      if (endpoint === "/api/predict-batch") {
+        setPrediction({ predictions: data.predictions, total: data.total });
+        showMsg("success", `Batch prediction: ${data.total} rows`);
+      } else if (endpoint === "/api/train") {
+        setTrainingResult({
+          training_samples: data.training_samples,
+          test_samples: data.test_samples,
+          metrics: data.metrics,
+        });
+        await fetchModelStatus();
+        await fetchCatBoostStatus();
+        showMsg("success", "Training completed");
+      } else if (endpoint === "/api/train-catboost") {
+        setTrainingResult({
+          model: "CatBoost",
+          metrics: data.metrics,
+          features: data.features,
+        });
+        await fetchModelStatus();
+        await fetchCatBoostStatus();
+        showMsg("success", "CatBoost trained");
       } else {
-        if (endpoint === "/api/train") {
-          setTrainingResult(data);
-          fetchModelStatus();
-          fetchStatistics();
-          setMessage({
-            type: "success",
-            text: "Training finished (ensemble + CatBoost if available)",
-          });
-        } else if (endpoint === "/api/predict-batch") {
-          setPrediction(data);
-          setMessage({ type: "success", text: "Batch prediction finished" });
-        }
+        showMsg("success", "Upload completed");
       }
     } catch (err) {
-      setMessage({ type: "error", text: "Network error during upload" });
+      console.error(err);
+      showMsg("error", err.message || "Upload failed");
     } finally {
       setLoading(false);
     }
   };
 
+  // CORE CHANGE: robust retrain that works for CatBoost and other models
   const handleRetrainModel = async (modelName) => {
-    setRetrainLoading((s) => ({ ...s, [modelName]: true }));
-    setRetrainResults((s) => ({ ...s, [modelName]: null }));
-    setMessage(null);
+    setLoading(true);
     try {
+      // Ensure hyperparams exists for the model (empty object allowed)
+      const hp = hyperparameters[modelName] ?? {};
+
+      const body = {
+        model_name: modelName,
+        hyperparameters: hp,
+      };
+
       const res = await fetch(`${API_URL}/api/update-hyperparameters`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model_name: modelName,
-          hyperparameters: hyperparameters[modelName],
-        }),
+        body: JSON.stringify(body),
       });
+
       const data = await safeJson(res);
       if (!res.ok) {
-        const err =
-          data?.detail || data?.error || data?.raw || JSON.stringify(data);
-        setMessage({ type: "error", text: `Retrain failed: ${err}` });
-      } else {
-        setRetrainResults((s) => ({ ...s, [modelName]: data }));
-        setMessage({
-          type: "success",
-          text: `${modelName} retrained successfully`,
-        });
-        fetchModelStatus();
-        fetchStatistics();
+        // backend will usually return { detail: "..."} on error
+        throw new Error(data.detail || JSON.stringify(data));
       }
+
+      // Normalise returned metrics:
+      // - backend returns {"status":"success","model":name,"metrics":{...}} for ensembles
+      // - for CatBoost it returns {"status":"success","model":"CatBoost","metrics":{...}} as well
+      // But sometimes it may return metrics directly — handle both.
+      const returnedMetrics =
+        data.metrics ??
+        data.metrics ??
+        (data && data.model && data.metrics ? data.metrics : data);
+
+      // Update trainingResult with a 'last_retrain' summary (so UI shows updated numbers)
+      setTrainingResult((prev) => ({
+        ...prev,
+        last_retrain: {
+          model: data.model || modelName,
+          metrics: returnedMetrics,
+          timestamp: new Date().toISOString(),
+        },
+      }));
+
+      // refresh statuses so UI reflects new models and feature lists
+      await fetchModelStatus();
+      await fetchCatBoostStatus();
+
+      showMsg("success", `${modelName} retrained — metrics updated`);
     } catch (err) {
-      setMessage({ type: "error", text: "Network error during retrain" });
+      console.error("Retrain error:", err);
+      showMsg("error", err.message || "Retrain failed");
     } finally {
-      setRetrainLoading((s) => ({ ...s, [modelName]: false }));
+      setLoading(false);
     }
   };
 
-  const MessageBox = ({ msg }) => {
-    if (!msg) return null;
-    return (
-      <div
-        className={`p-3 rounded-md ${
-          msg.type === "error"
-            ? "bg-red-50 border border-red-200 text-red-700"
-            : "bg-green-50 border border-green-200 text-green-700"
-        }`}
-      >
-        {msg.text}
-      </div>
-    );
-  };
-
-  // UI renderers
-  const renderPredictTab = () => (
-    <div className="space-y-6">
-      <div className="bg-gradient-to-r from-blue-500 to-purple-600 text-white p-6 rounded-lg shadow-lg">
-        <h2 className="text-2xl font-bold mb-2">
-          Predict Exoplanet Classification
-        </h2>
-        <p className="opacity-90">
-          Enter parameters or upload a CSV file to classify KOI candidates
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-          <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
-            <FileText className="w-5 h-5" />
-            Manual Input
-          </h3>
-
-          <div className="mb-4">
-            <label className="text-sm text-gray-600 mr-3">Predict with:</label>
-            <select
-              value={selectedPredictModel}
-              onChange={(e) => setSelectedPredictModel(e.target.value)}
-              className="px-2 py-1 border rounded"
-            >
-              <option value="Ensemble">Ensemble (HGB + RF + XGB)</option>
-              <option value="CatBoost">CatBoost</option>
-            </select>
-          </div>
-
-          <div className="space-y-3 max-h-96 overflow-y-auto">
-            {Object.keys(manualInput).map((key) => (
-              <div key={key}>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {key.replace(/_/g, " ").toUpperCase()}
-                </label>
-                <input
-                  type="number"
-                  step="any"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  value={manualInput[key]}
-                  onChange={(e) =>
-                    setManualInput({ ...manualInput, [key]: e.target.value })
-                  }
-                  placeholder={`Enter ${key}`}
-                />
-              </div>
-            ))}
-          </div>
-
-          <button
-            onClick={handlePredict}
-            disabled={loading || !modelStatus?.trained}
-            className="w-full mt-4 bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:bg-gray-300 flex items-center justify-center gap-2"
-          >
-            <Zap className="w-4 h-4" />
-            {loading ? "Predicting..." : "Predict"}
-          </button>
-
-          <div className="mt-4">
-            <p className="text-xs text-gray-500">
-              Models must be trained first. If CatBoost isn't trained, select
-              Ensemble.
-            </p>
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-          <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
-            <Upload className="w-5 h-5" />
-            Batch Prediction
-          </h3>
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-            <Upload className="w-12 h-12 mx-auto text-gray-400 mb-3" />
-            <p className="text-gray-600 mb-3">
-              Upload CSV file for batch prediction (Ensemble)
-            </p>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={(e) =>
-                e.target.files[0] &&
-                handleFileUpload(e.target.files[0], "/api/predict-batch")
-              }
-              className="hidden"
-              id="batch-upload"
-              disabled={loading || !modelStatus?.trained}
-            />
-            <label
-              htmlFor="batch-upload"
-              className="inline-block bg-gray-100 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-200 cursor-pointer"
-            >
-              Choose File
-            </label>
-          </div>
-
-          {prediction && (
-            <div className="mt-6 p-4 bg-gradient-to-r from-green-50 to-blue-50 rounded-lg border border-green-200">
-              <h4 className="font-semibold mb-3">
-                Batch Prediction Result (sample)
-              </h4>
-              <p>Total Predictions: {prediction.total}</p>
-              <div className="max-h-60 overflow-y-auto mt-2">
-                {prediction.predictions?.slice(0, 8).map((p, i) => (
-                  <div key={i} className="flex justify-between py-1 border-b">
-                    <span>#{p.index}</span>
-                    <span
-                      className={
-                        p.prediction === "PLANET"
-                          ? "text-green-600"
-                          : "text-red-600"
-                      }
-                    >
-                      {p.prediction}
-                    </span>
-                    <span>{(p.probability_planet * 100).toFixed(1)}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {predictionCat && (
-            <div className="mt-6 p-4 bg-gradient-to-r from-yellow-50 to-orange-50 rounded-lg border border-yellow-200">
-              <h4 className="font-semibold mb-3">CatBoost Prediction</h4>
-              <p>
-                Prediction:{" "}
-                <span className="font-semibold">
-                  {predictionCat.prediction}
-                </span>
-              </p>
-              <p>
-                Probability (Exoplanet):{" "}
-                {(predictionCat.probability_exoplanet * 100).toFixed(2)}%
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderTrainTab = () => (
-    <div className="space-y-6">
-      <div className="bg-gradient-to-r from-purple-500 to-pink-600 text-white p-6 rounded-lg shadow-lg">
-        <h2 className="text-2xl font-bold mb-2">Train & Update Models</h2>
-        <p className="opacity-90">
-          Upload new data to train or retrain the ensemble and CatBoost models
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-          <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
-            <Database className="w-5 h-5" /> Upload Training Data
-          </h3>
-          <label className="inline-flex items-center gap-2 mt-3">
-            <input
-              type="checkbox"
-              checked={appendToMaster}
-              onChange={(e) => setAppendToMaster(e.target.checked)}
-              className="form-checkbox"
-            />
-            <span className="text-sm text-gray-600">
-              Append uploaded CSV to master dataset (recommended)
-            </span>
-          </label>
-
-          <div className="border-2 border-dashed border-purple-300 rounded-lg p-8 text-center">
-            <Database className="w-12 h-12 mx-auto text-purple-400 mb-3" />
-            <p className="text-gray-600 mb-3">
-              Upload CSV with koi_disposition column
-            </p>
-            <p className="text-sm text-gray-500 mb-4">
-              This will train the ensemble and also try to train CatBoost (if
-              the CSV supports it).
-            </p>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={(e) =>
-                e.target.files[0] &&
-                handleFileUpload(e.target.files[0], "/api/train")
-              }
-              className="hidden"
-              id="train-upload"
-              disabled={loading}
-            />
-            <label
-              htmlFor="train-upload"
-              className="inline-block bg-purple-600 text-white py-2 px-6 rounded-md hover:bg-purple-700 cursor-pointer"
-            >
-              {loading ? "Training..." : "Upload & Train"}
-            </label>
-          </div>
-
-          {trainingResult && (
-            <div className="mt-6 p-4 bg-green-50 rounded-lg border border-green-200">
-              <h4 className="font-semibold text-green-800 mb-3">
-                Training Complete!
-              </h4>
-              <div className="space-y-2 text-sm">
-                <p>Training Samples: {trainingResult.training_samples}</p>
-                <p>Test Samples: {trainingResult.test_samples}</p>
-                {Object.entries(trainingResult.metrics).map(
-                  ([model, metrics]) => (
-                    <div key={model} className="mt-3 p-2 bg-white rounded">
-                      <p className="font-semibold">{model}</p>
-                      <p>Accuracy: {(metrics.accuracy * 100).toFixed(2)}%</p>
-                      <p>F1-Score: {(metrics.f1_score * 100).toFixed(2)}%</p>
-                      {model === "CatBoost" && (
-                        <p className="text-xs text-gray-600">
-                          (CatBoost trained from raw CSV features)
-                        </p>
-                      )}
-                    </div>
-                  )
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-          <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
-            <Settings className="w-5 h-5" /> Hyperparameters & Retrain
-          </h3>
-
-          <div className="space-y-4">
-            {Object.entries(hyperparameters).map(([modelName, params]) => (
-              <div
-                key={modelName}
-                className="border border-gray-200 rounded-lg p-4"
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <h4 className="font-semibold">{modelName}</h4>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleRetrainModel(modelName)}
-                      disabled={retrainLoading[modelName]}
-                      className="text-sm px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:bg-gray-300"
-                    >
-                      {retrainLoading[modelName]
-                        ? "Retraining..."
-                        : "Retrain model"}
-                    </button>
-                  </div>
-                </div>
-
-                {Object.entries(params).map(([param, value]) => (
-                  <div key={param} className="mb-3">
-                    <label className="block text-sm text-gray-600 mb-1">
-                      {param}
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        step="any"
-                        value={value}
-                        onChange={(e) =>
-                          setHyperparameters({
-                            ...hyperparameters,
-                            [modelName]: {
-                              ...hyperparameters[modelName],
-                              [param]: parseFloat(e.target.value),
-                            },
-                          })
-                        }
-                        className="w-full px-2 py-1 border border-gray-300 rounded"
-                      />
-                      <button
-                        onClick={() =>
-                          setHyperparameters({
-                            ...hyperparameters,
-                            [modelName]: {
-                              ...hyperparameters[modelName],
-                              [param]: param.includes("learning_rate")
-                                ? Number((value * 0.9).toFixed(4))
-                                : value,
-                            },
-                          })
-                        }
-                        className="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 text-sm"
-                        title="Quick tweak"
-                      >
-                        tweak
-                      </button>
-                    </div>
-                  </div>
-                ))}
-
-                {renderRetrainMetrics(retrainResults[modelName])}
-              </div>
-            ))}
-
-            <p className="text-xs text-gray-500">
-              Tip: upload a training CSV first (Train Models). Then use the
-              Retrain buttons to quickly apply hyperparameter changes to a
-              single model.
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderStatsTab = () => (
-    <div className="space-y-6">
-      <div className="bg-gradient-to-r from-green-500 to-teal-600 text-white p-6 rounded-lg shadow-lg">
-        <h2 className="text-2xl font-bold mb-2">
-          Model Statistics & Performance
-        </h2>
-        <p className="opacity-90">
-          View current model performance and training history
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white p-6 rounded-lg shadow-md border-l-4 border-blue-500">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-600 text-sm">Model Status</p>
-              <p className="text-2xl font-bold">
-                {modelStatus?.trained ? "Trained" : "Not Trained"}
-              </p>
-            </div>
-            <Activity className="w-12 h-12 text-blue-500" />
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-md border-l-4 border-green-500">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-600 text-sm">Features</p>
-              <p className="text-2xl font-bold">
-                {modelStatus?.feature_count || 0}
-              </p>
-            </div>
-            <BarChart3 className="w-12 h-12 text-green-500" />
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-md border-l-4 border-purple-500">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-600 text-sm">Models</p>
-              <p className="text-2xl font-bold">
-                {modelStatus?.models?.length || 0}
-              </p>
-            </div>
-            <TrendingUp className="w-12 h-12 text-purple-500" />
-          </div>
-        </div>
-      </div>
-
-      {statistics && statistics.metrics && (
-        <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-          <h3 className="text-xl font-semibold mb-4">
-            Latest Model Performance
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {Object.entries(statistics.metrics).map(([modelName, metrics]) => (
-              <div
-                key={modelName}
-                className="border border-gray-200 rounded-lg p-4"
-              >
-                <h4 className="font-semibold mb-3 text-center">{modelName}</h4>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span>Accuracy:</span>
-                    <span className="font-semibold">
-                      {(metrics.accuracy * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Precision:</span>
-                    <span className="font-semibold">
-                      {(metrics.precision * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Recall:</span>
-                    <span className="font-semibold">
-                      {(metrics.recall * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>F1-Score:</span>
-                    <span className="font-semibold">
-                      {(metrics.f1_score * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>ROC-AUC:</span>
-                    <span className="font-semibold">
-                      {(metrics.roc_auc * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {modelStatus?.training_history &&
-        modelStatus.training_history.length > 0 && (
-          <div className="bg-white p-6 rounded-lg shadow-md border border-gray-200">
-            <h3 className="text-xl font-semibold mb-4">Training History</h3>
-            <div className="space-y-2">
-              {modelStatus.training_history.map((record, idx) => (
-                <div key={idx} className="border-b border-gray-200 py-2">
-                  <p className="text-sm text-gray-600">{record.timestamp}</p>
-                  <p className="text-sm">
-                    Samples: {record.samples} | Features: {record.features}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+  // UI helper
+  const DarkCard = ({ children, className = "" }) => (
+    <div
+      className={`bg-slate-800/60 border border-slate-700 rounded-lg p-6 shadow-lg ${className}`}
+    >
+      {children}
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="bg-white shadow-md">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <h1 className="text-3xl font-bold text-gray-900">
-            🪐 Exoplanet Classifier
-          </h1>
-          <p className="text-gray-600 mt-1">
-            AI-powered classification for Kepler KOI candidates
-          </p>
-        </div>
-      </div>
+    <div className="min-h-screen bg-[radial-gradient(ellipse_at_bottom_right,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-black text-white">
+      <div className="max-w-6xl mx-auto py-8 px-4">
+        <header className="flex items-center justify-between mb-8">
+          <div>
+            <h1 className="text-4xl font-extrabold tracking-tight">
+              🪐 Exoplanet Classifier
+            </h1>
+            <p className="text-slate-300 mt-1">
+              Upload datasets, train models, and predict KOI classifications —
+              now with CatBoost and ensemble.
+            </p>
+          </div>
+          <div className="text-sm text-slate-400">
+            <div>
+              Backend:{" "}
+              {modelStatus?.trained ? (
+                <span className="text-green-400">Trained</span>
+              ) : (
+                <span className="text-amber-400">Not trained</span>
+              )}
+            </div>
+            <div className="mt-1">
+              Models: {modelStatus?.models?.join(", ")}
+            </div>
+          </div>
+        </header>
 
-      <div className="max-w-7xl mx-auto px-4 py-6">
-        <div className="flex gap-2 mb-6">
+        <nav className="flex gap-3 mb-6">
           <button
             onClick={() => setActiveTab("predict")}
-            className={`px-6 py-2 rounded-lg font-medium transition ${
+            className={`px-4 py-2 rounded ${
               activeTab === "predict"
-                ? "bg-blue-600 text-white"
-                : "bg-white text-gray-700 hover:bg-gray-100"
+                ? "bg-indigo-600 text-white"
+                : "bg-slate-700/40 text-slate-200"
             }`}
           >
             Predict
           </button>
           <button
             onClick={() => setActiveTab("train")}
-            className={`px-6 py-2 rounded-lg font-medium transition ${
+            className={`px-4 py-2 rounded ${
               activeTab === "train"
-                ? "bg-purple-600 text-white"
-                : "bg-white text-gray-700 hover:bg-gray-100"
+                ? "bg-pink-600 text-white"
+                : "bg-slate-700/40 text-slate-200"
             }`}
           >
-            Train Models
+            Train
           </button>
           <button
             onClick={() => setActiveTab("stats")}
-            className={`px-6 py-2 rounded-lg font-medium transition ${
+            className={`px-4 py-2 rounded ${
               activeTab === "stats"
-                ? "bg-green-600 text-white"
-                : "bg-white text-gray-700 hover:bg-gray-100"
+                ? "bg-emerald-600 text-white"
+                : "bg-slate-700/40 text-slate-200"
             }`}
           >
-            Statistics
+            Stats
           </button>
-        </div>
+        </nav>
 
-        <MessageBox msg={message} />
+        {message && (
+          <div
+            className={`mb-4 p-3 rounded ${
+              message.type === "error"
+                ? "bg-red-700/30 border border-red-600 text-red-200"
+                : message.type === "success"
+                ? "bg-green-700/20 border border-green-500 text-green-200"
+                : "bg-slate-700/30 border border-slate-600 text-slate-200"
+            }`}
+          >
+            {message.text}
+          </div>
+        )}
 
-        {activeTab === "predict" && renderPredictTab()}
-        {activeTab === "train" && renderTrainTab()}
-        {activeTab === "stats" && renderStatsTab()}
+        {/* PREDICT */}
+        {activeTab === "predict" && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <DarkCard>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold">Manual Prediction</h2>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedPredictModel}
+                    onChange={(e) => setSelectedPredictModel(e.target.value)}
+                    className="bg-slate-700/40 px-2 py-1 rounded"
+                  >
+                    <option value="Ensemble">Ensemble (HGB + RF + XGB)</option>
+                    <option value="CatBoost">CatBoost</option>
+                  </select>
+                </div>
+              </div>
+
+              <p className="text-slate-400 text-sm mb-3">
+                Fill in the numeric fields below. Missing values will be set to
+                0.
+              </p>
+
+              <div className="max-h-[46vh] overflow-y-auto space-y-3 pb-2">
+                {SELECTED_FEATURES.map((f) => (
+                  <div key={f} className="grid grid-cols-2 gap-2 items-center">
+                    <label className="text-sm text-slate-300">{f}</label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={
+                        selectedPredictModel === "CatBoost"
+                          ? catboostInputs[f] ?? ""
+                          : ensembleInputs[f] ?? ""
+                      }
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (selectedPredictModel === "CatBoost")
+                          setCatboostInputs({ ...catboostInputs, [f]: val });
+                        else setEnsembleInputs({ ...ensembleInputs, [f]: val });
+                      }}
+                      className="bg-slate-700/40 border border-slate-600 rounded px-3 py-2 text-slate-200"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 flex gap-3">
+                <button
+                  onClick={handlePredict}
+                  disabled={loading}
+                  className="bg-indigo-600 px-4 py-2 rounded hover:bg-indigo-700"
+                >
+                  {loading ? (
+                    "Predicting..."
+                  ) : (
+                    <>
+                      <Zap className="inline-block w-4 mr-2" /> Predict
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => {
+                    setEnsembleInputs(
+                      Object.fromEntries(SELECTED_FEATURES.map((f) => [f, ""]))
+                    );
+                    setCatboostInputs(
+                      Object.fromEntries(SELECTED_FEATURES.map((f) => [f, ""]))
+                    );
+                    setPrediction(null);
+                    setPredictionCat(null);
+                    showMsg("info", "Inputs cleared");
+                  }}
+                  className="bg-slate-700/30 px-4 py-2 rounded"
+                >
+                  Clear
+                </button>
+              </div>
+
+              {prediction && (
+                <div className="mt-4 bg-slate-800/40 p-3 rounded border border-slate-700">
+                  <h4 className="font-semibold">Ensemble Result</h4>
+                  <div className="mt-2 flex justify-between">
+                    <span className="text-slate-300">Classification</span>
+                    <span
+                      className={`font-bold ${
+                        prediction.prediction === "PLANET"
+                          ? "text-green-300"
+                          : "text-rose-400"
+                      }`}
+                    >
+                      {prediction.prediction}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm mt-1">
+                    <span>Planet Prob:</span>
+                    <span>
+                      {(prediction.probability_planet * 100).toFixed(2)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {predictionCat && (
+                <div className="mt-4 bg-slate-800/40 p-3 rounded border border-slate-700">
+                  <h4 className="font-semibold">CatBoost Result</h4>
+                  <div className="mt-2 flex justify-between">
+                    <span className="text-slate-300">Classification</span>
+                    <span
+                      className={`font-bold ${
+                        predictionCat.prediction === "EXOPLANET"
+                          ? "text-green-300"
+                          : "text-rose-400"
+                      }`}
+                    >
+                      {predictionCat.prediction}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm mt-1">
+                    <span>Exoplanet Prob:</span>
+                    <span>
+                      {(predictionCat.probability_exoplanet * 100).toFixed(2)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+            </DarkCard>
+
+            <DarkCard>
+              <h3 className="text-lg font-semibold mb-2">Batch Prediction</h3>
+              <p className="text-slate-400 text-sm mb-3">
+                Upload a CSV for batch predictions (ensemble is recommended).
+              </p>
+              <div className="border-2 border-dashed border-slate-700 rounded p-6 text-center">
+                <Upload className="mx-auto text-slate-400" />
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={(e) =>
+                    e.target.files[0] &&
+                    handleFileUpload(e.target.files[0], "/api/predict-batch")
+                  }
+                  className="hidden"
+                  id="batch"
+                />
+                <label
+                  htmlFor="batch"
+                  className="inline-block mt-3 bg-slate-700/40 px-4 py-2 rounded cursor-pointer"
+                >
+                  Choose CSV
+                </label>
+              </div>
+
+              {prediction && (
+                <div className="mt-4">
+                  <h4 className="font-semibold">Batch preview</h4>
+                  <p className="text-slate-300">Total: {prediction.total}</p>
+                  <div className="max-h-40 overflow-y-auto mt-2">
+                    {prediction.predictions?.slice(0, 8).map((p) => (
+                      <div
+                        key={p.index}
+                        className="flex justify-between py-1 border-b border-slate-700"
+                      >
+                        <span>#{p.index}</span>
+                        <span
+                          className={
+                            p.prediction === "PLANET"
+                              ? "text-green-300"
+                              : "text-rose-400"
+                          }
+                        >
+                          {p.prediction}
+                        </span>
+                        <span>{(p.probability_planet * 100).toFixed(1)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </DarkCard>
+          </div>
+        )}
+
+        {/* TRAIN */}
+        {activeTab === "train" && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <DarkCard>
+              <h3 className="text-xl font-semibold mb-2">
+                Upload Training CSV
+              </h3>
+              <p className="text-slate-400 text-sm mb-3">
+                CSV must include a disposition/status-like column (e.g.,
+                koi_disposition). Selected features will be auto-detected.
+              </p>
+
+              <div className="mb-4">
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={appendToMaster}
+                    onChange={(e) => setAppendToMaster(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span className="text-sm text-slate-300">
+                    Append to master dataset (recommended)
+                  </span>
+                </label>
+              </div>
+
+              <div className="border-2 border-dashed border-slate-700 rounded p-6 text-center">
+                <Database className="mx-auto text-slate-400" />
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={(e) =>
+                    e.target.files[0] &&
+                    handleFileUpload(e.target.files[0], "/api/train")
+                  }
+                  className="hidden"
+                  id="trainfile"
+                />
+                <label
+                  htmlFor="trainfile"
+                  className="inline-block mt-3 bg-pink-600 px-4 py-2 rounded cursor-pointer"
+                >
+                  Choose & Train
+                </label>
+              </div>
+
+              {trainingResult && (
+                <div className="mt-4 bg-slate-800/40 p-3 rounded border border-slate-700">
+                  <h4 className="font-semibold">Training results</h4>
+                  <div className="mt-2 text-sm space-y-2">
+                    <div>
+                      Training samples: {trainingResult.training_samples}
+                    </div>
+                    <div>Test samples: {trainingResult.test_samples}</div>
+
+                    {/* metrics from full train */}
+                    {trainingResult.metrics &&
+                      Object.entries(trainingResult.metrics).map(([k, v]) => (
+                        <div
+                          key={k}
+                          className="mt-2 p-2 bg-slate-900/40 rounded"
+                        >
+                          <div className="font-semibold">{k}</div>
+                          <div className="text-xs">
+                            Accuracy: {formatPct(v.accuracy)}
+                          </div>
+                          <div className="text-xs">
+                            F1: {formatPct(v.f1_score)}
+                          </div>
+                        </div>
+                      ))}
+
+                    {/* last retrain summary */}
+                    {trainingResult.last_retrain && (
+                      <div className="mt-3 p-2 border border-slate-700 rounded bg-slate-900/30">
+                        <div className="font-semibold">
+                          Last retrain: {trainingResult.last_retrain.model}
+                        </div>
+                        <pre className="text-xs mt-1">
+                          {JSON.stringify(
+                            trainingResult.last_retrain.metrics,
+                            null,
+                            2
+                          )}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </DarkCard>
+
+            <DarkCard>
+              <h3 className="text-xl font-semibold mb-2">
+                Hyperparameters & Retrain
+              </h3>
+              <p className="text-slate-400 text-sm mb-3">
+                Edit hyperparameters then click Retrain (re-trains single model
+                using last split/master dataset).
+              </p>
+
+              <div className="space-y-4 max-h-[55vh] overflow-y-auto">
+                {Object.entries(hyperparameters).map(([modelName, params]) => (
+                  <div
+                    key={modelName}
+                    className="p-3 bg-slate-900/30 rounded border border-slate-700"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="font-semibold">{modelName}</div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleRetrainModel(modelName)}
+                          className="bg-indigo-600 px-3 py-1 rounded text-sm"
+                          disabled={loading}
+                        >
+                          {loading ? "Running..." : "Retrain"}
+                        </button>
+                      </div>
+                    </div>
+                    {Object.entries(params).map(([p, val]) => (
+                      <div key={p} className="flex items-center gap-2 mb-2">
+                        <label className="w-36 text-sm text-slate-300">
+                          {p}
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          value={val}
+                          onChange={(e) =>
+                            setHyperparameters({
+                              ...hyperparameters,
+                              [modelName]: {
+                                ...hyperparameters[modelName],
+                                [p]: Number(e.target.value),
+                              },
+                            })
+                          }
+                          className="bg-slate-700/40 rounded px-2 py-1 text-slate-200"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </DarkCard>
+          </div>
+        )}
+
+        {/* STATS */}
+        {activeTab === "stats" && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-slate-800/40 p-4 rounded border border-slate-700">
+                <div className="text-slate-300">Model Status</div>
+                <div className="text-2xl font-bold">
+                  {modelStatus?.trained ? "Trained" : "Not Trained"}
+                </div>
+              </div>
+              <div className="bg-slate-800/40 p-4 rounded border border-slate-700">
+                <div className="text-slate-300">Ensemble Features</div>
+                <div className="text-xl font-bold">
+                  {SELECTED_FEATURES.length}
+                </div>
+              </div>
+              <div className="bg-slate-800/40 p-4 rounded border border-slate-700">
+                <div className="text-slate-300">CatBoost Features</div>
+                <div className="text-xl font-bold">
+                  {SELECTED_FEATURES.length}
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-800/40 p-4 rounded border border-slate-700">
+              <h3 className="font-semibold">Latest Training</h3>
+              <pre className="text-xs overflow-auto mt-2 bg-transparent">
+                {JSON.stringify(
+                  modelStatus?.training_history?.[
+                    modelStatus?.training_history?.length - 1
+                  ] || {},
+                  null,
+                  2
+                )}
+              </pre>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
