@@ -4,7 +4,8 @@ FastAPI Backend for Exoplanet Classification (UPDATED)
 - CatBoost defaults match original script exactly
 - Master dataset accumulation (uploaded_data/master_dataset.csv)
 - Generalized detection of disposition/status columns
-- /api/train appends uploaded CSV to master dataset (default) and re-trains ensemble + CatBoost
+- /api/train appends uploaded CSV to master_dataset.csv (default) and re-trains ensemble + CatBoost
+- Added /api/explain endpoint (SHAP + simple ELI5)
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
@@ -16,6 +17,8 @@ import numpy as np
 import pickle
 import json
 import os
+from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score
+import math
 from datetime import datetime
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler, RobustScaler
@@ -533,6 +536,7 @@ def read_root():
             "/api/train-catboost",
             "/api/predict-catboost",
             "/api/catboost-status",
+            "/api/explain",
         ],
     }
 
@@ -975,6 +979,174 @@ def get_feature_importance():
     return {"feature_importance": feature_importance[:20]}
 
 
+# ---------- NEW: /api/explain endpoint (SHAP + ELI5) ----------
+# ---------- FIXED: /api/explain endpoint (robust to nested lists/arrays) ----------
+@app.post("/api/explain")
+async def explain(data: PredictionInput):
+    """
+    Returns SHAP explanations (top 5) for a single-row prediction.
+    Robust handling for different shapes returned by predict_proba and shap.
+    """
+    try:
+        # lazy import shap to avoid module import issues if not installed
+        try:
+            import shap
+        except Exception:
+            raise HTTPException(
+                status_code=500,
+                detail="shap package not installed on server. Run `pip install shap`.",
+            )
+
+        df = pd.DataFrame([data.features])
+
+        # Helper: safely convert a possibly-nested value into a Python float
+        def to_scalar(x):
+            try:
+                arr = np.asarray(x)
+                if arr.size == 0:
+                    raise ValueError("empty array")
+                # prefer the single scalar if available
+                if arr.size == 1:
+                    return float(arr.item())
+                # otherwise, if it's a 1-D array with multiple entries, return the first numeric entry
+                return float(arr.flatten()[0])
+            except Exception:
+                # as a last resort, try cast directly and let the caller handle exceptions
+                return float(x)
+
+        def make_eli5(pred_label: str, prob: float, top_feats: List[Dict[str, float]]):
+            if not top_feats:
+                return f"Model predicted {pred_label} with probability {prob:.2f}."
+            top_names = [f["feature"] for f in top_feats[:2]]
+            directions = []
+            for f in top_feats[:2]:
+                sign = "increases" if f["value"] > 0 else "decreases"
+                directions.append(f"{f['feature']} {sign} the chance")
+            # keep it very short and readable
+            return (
+                f"The model predicted {pred_label} (prob {prob:.2f}). "
+                f"The strongest influences were {', '.join(top_names)}. "
+                f"In short: {directions[0]} and {directions[1]}."
+            )
+
+        # prefer RandomForest for SHAP explanations if available
+        rf = model_store.models.get("RandomForest")
+        if rf is not None:
+            features = model_store.feature_names or []
+            # ensure expected features exist in incoming df
+            for feat in features:
+                if feat not in df.columns:
+                    df[feat] = 0.0
+            X = df[features]
+
+            proba_raw = rf.predict_proba(X)[0]  # may be ndarray or list-like
+            # coerce to flat row and extract planet prob robustly
+            proba_arr = np.asarray(proba_raw).flatten()
+            planet_prob = (
+                to_scalar(proba_arr[1])
+                if proba_arr.size > 1
+                else to_scalar(proba_arr[0])
+            )
+
+            pred_raw = rf.predict(X)[0]
+            pred = int(np.asarray(pred_raw).item())
+
+            explainer = shap.TreeExplainer(rf)
+            raw_shap = explainer.shap_values(X)
+
+            # raw_shap may be:
+            #  - an array shaped (n_samples, n_features)
+            #  - a list of arrays (per-class) e.g. [class0_shap, class1_shap]
+            if isinstance(raw_shap, list):
+                # prefer class 1 explanations if available, else use first
+                shap_for_pos = raw_shap[1] if len(raw_shap) > 1 else raw_shap[0]
+            else:
+                shap_for_pos = raw_shap
+
+            # shap_for_pos[0] should be the vector for the first (and only) sample
+            shap_row = np.asarray(shap_for_pos[0]).flatten()
+            shap_list = []
+            for f, v in zip(features, shap_row):
+                try:
+                    val = to_scalar(v)
+                except Exception:
+                    val = 0.0
+                shap_list.append({"feature": f, "value": float(val)})
+
+            top5 = sorted(shap_list, key=lambda x: abs(x["value"]), reverse=True)[:5]
+            eli5 = make_eli5("PLANET" if pred == 1 else "NOT_PLANET", planet_prob, top5)
+            return {
+                "prediction": "PLANET" if pred == 1 else "NOT_PLANET",
+                "probabilities": {
+                    "planet": float(planet_prob),
+                    "not_planet": float(to_scalar(proba_arr[0])),
+                },
+                "shap": top5,
+                "eli5": eli5,
+            }
+
+        # fallback to CatBoost detector
+        detector = model_store.catboost_detector
+        if detector is not None and detector.model is not None:
+            feats = detector.feature_names
+            for feat in feats:
+                if feat not in df.columns:
+                    df[feat] = 0.0
+            X = df[feats]
+
+            proba_raw = detector.predict_proba(X)[0]
+            proba_arr = np.asarray(proba_raw).flatten()
+            planet_prob = (
+                to_scalar(proba_arr[1])
+                if proba_arr.size > 1
+                else to_scalar(proba_arr[0])
+            )
+
+            pred_raw = detector.predict(X)[0]
+            pred = int(np.asarray(pred_raw).item())
+
+            explainer = shap.TreeExplainer(detector.model)
+            raw_shap = explainer.shap_values(X)
+            if isinstance(raw_shap, list):
+                shap_for_pos = raw_shap[1] if len(raw_shap) > 1 else raw_shap[0]
+            else:
+                shap_for_pos = raw_shap
+
+            shap_row = np.asarray(shap_for_pos[0]).flatten()
+            shap_list = []
+            for f, v in zip(feats, shap_row):
+                try:
+                    val = to_scalar(v)
+                except Exception:
+                    val = 0.0
+                shap_list.append({"feature": f, "value": float(val)})
+
+            top5 = sorted(shap_list, key=lambda x: abs(x["value"]), reverse=True)[:5]
+            eli5 = make_eli5(
+                "EXOPLANET" if pred == 1 else "FALSE_POSITIVE", planet_prob, top5
+            )
+            return {
+                "prediction": "EXOPLANET" if pred == 1 else "FALSE_POSITIVE",
+                "probabilities": {
+                    "planet": float(planet_prob),
+                    "not_planet": float(to_scalar(proba_arr[0])),
+                },
+                "shap": top5,
+                "eli5": eli5,
+            }
+
+        raise HTTPException(
+            status_code=400,
+            detail="No suitable model available for explanation. Train models first.",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------- existing manual data endpoint ---------- #
 class ManualDataInput(BaseModel):
     koi_period: float
     koi_duration: float
@@ -1022,6 +1194,208 @@ async def add_manual_data(data: ManualDataInput):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=400, detail=str(e))
+
+
+def to_json_number(x):
+    """
+    Convert a numeric value to a JSON-safe Python float or None.
+    Replaces NaN/Inf with None.
+    """
+    try:
+        # convert numpy scalar -> Python float
+        v = float(x)
+    except Exception:
+        return None
+    if not np.isfinite(v):
+        return None
+    return v
+
+
+def sanitize_array(arr):
+    """Convert array-like (numpy/list) to list of JSON-safe floats (None for non-finite)."""
+    if arr is None:
+        return None
+    a = np.asarray(arr)
+    out = []
+    for v in a.flat:
+        out.append(to_json_number(v))
+    # if 1-D originally, return as list; if multi-dimensional, still flattened (we use only 1D arrays here)
+    return out
+
+
+# --- Robust eval metrics endpoint ---
+@app.get("/api/eval-metrics")
+def api_eval_metrics():
+    """
+    Return evaluation metrics for the frontend (JSON-safe).
+    - metrics: accuracy, precision, recall, f1_score, roc_auc (numbers or null)
+    - confusion: tn, fp, fn, tp (ints)
+    - roc: { fpr: [...], tpr: [...], thresholds: [...], auc: float|null }
+    - feature_importance: [{feature, importance}, ...]
+    - samples: number of test samples
+    """
+    try:
+        if model_store.last_train is None:
+            return {"error": "No training split available. Run /api/train first."}
+
+        # Prefer RandomForest for feature importance and probabilities; otherwise use any model that supports predict_proba
+        rf = model_store.models.get("RandomForest")
+        if rf is None:
+            for m in model_store.models.values():
+                if m is not None:
+                    rf = m
+                    break
+
+        if rf is None:
+            return {"error": "No trained models available."}
+
+        # Pull last train/test
+        X_test = model_store.last_train.get("X_test")
+        y_test = model_store.last_train.get("y_test")
+
+        if X_test is None or y_test is None:
+            return {"error": "Training split incomplete: missing X_test or y_test."}
+
+        # Convert to numpy arrays (handles pandas/numpy)
+        X_test_vals = np.asarray(X_test)
+        y_test_vals = np.asarray(y_test)
+
+        # Ensure y_test is 1-D
+        if y_test_vals.ndim > 1:
+            y_test_vals = y_test_vals.ravel()
+
+        # If y_test are not numeric, try to convert (e.g., bool/str)
+        try:
+            y_test_vals = y_test_vals.astype(int)
+        except Exception:
+            # fallback: try numeric conversion
+            y_test_vals = np.array(
+                [
+                    int(float(v)) if (v is not None and str(v) != "") else 0
+                    for v in y_test_vals
+                ]
+            )
+
+        samples = int(len(y_test_vals))
+
+        # Predictions (wrap in try/except to guard odd models)
+        try:
+            y_pred = rf.predict(X_test_vals)
+            y_pred = np.asarray(y_pred).ravel()
+        except Exception as e:
+            # If predict fails, return partial info
+            return {"error": f"Model prediction failed for eval metrics: {str(e)}"}
+
+        # Confusion matrix (safe)
+        try:
+            cm = confusion_matrix(y_test_vals, y_pred)
+            if cm.shape == (2, 2):
+                tn, fp, fn, tp = (
+                    int(cm[0, 0]),
+                    int(cm[0, 1]),
+                    int(cm[1, 0]),
+                    int(cm[1, 1]),
+                )
+            else:
+                # handle unexpected shapes
+                tn = int(cm[0, 0]) if cm.size > 0 else 0
+                fp = int(cm[0, 1]) if cm.size > 1 else 0
+                fn = int(cm[1, 0]) if cm.size > 2 else 0
+                tp = int(cm[1, 1]) if cm.size > 3 else 0
+        except Exception:
+            tn = fp = fn = tp = 0
+
+        # Basic metrics (guard divisions and non-finite values)
+        def safe_metric(fn, y_true, y_pred):
+            try:
+                v = fn(y_true, y_pred)
+                return to_json_number(v)
+            except Exception:
+                return None
+
+        accuracy = safe_metric(accuracy_score, y_test_vals, y_pred)
+        precision = safe_metric(
+            lambda a, b: precision_score(a, b, zero_division=0), y_test_vals, y_pred
+        )
+        recall = safe_metric(
+            lambda a, b: recall_score(a, b, zero_division=0), y_test_vals, y_pred
+        )
+        f1s = safe_metric(
+            lambda a, b: f1_score(a, b, zero_division=0), y_test_vals, y_pred
+        )
+
+        # ROC (only if we have probabilities and both classes present)
+        roc_data = None
+        try:
+            if len(np.unique(y_test_vals)) > 1 and hasattr(rf, "predict_proba"):
+                y_proba = np.asarray(rf.predict_proba(X_test_vals)[:, 1]).ravel()
+
+                # mask out non-finite probabilities
+                finite_mask = np.isfinite(y_proba)
+                if (
+                    np.sum(finite_mask) >= 2
+                    and np.unique(y_test_vals[finite_mask]).size > 1
+                ):
+                    fpr, tpr, thresholds = roc_curve(
+                        y_test_vals[finite_mask], y_proba[finite_mask]
+                    )
+                    auc = roc_auc_score(y_test_vals[finite_mask], y_proba[finite_mask])
+                    roc_data = {
+                        "fpr": sanitize_array(fpr),
+                        "tpr": sanitize_array(tpr),
+                        "thresholds": sanitize_array(thresholds),
+                        "auc": to_json_number(auc),
+                    }
+                else:
+                    # probabilities were not usable (constant or non-finite)
+                    roc_data = None
+            else:
+                roc_data = None
+        except Exception as e:
+            # If predict_proba / ROC computation fails, skip ROC
+            print("Warning: ROC computation failed:", str(e))
+            roc_data = None
+
+        # Feature importance (if available)
+        feature_importance = []
+        try:
+            if hasattr(rf, "feature_importances_") and model_store.feature_names:
+                importances = np.asarray(rf.feature_importances_)
+                features = list(model_store.feature_names)
+                # align lengths defensively
+                n = min(len(features), importances.size)
+                feature_importance = [
+                    {
+                        "feature": features[i],
+                        "importance": to_json_number(importances[i]),
+                    }
+                    for i in range(n)
+                ]
+        except Exception:
+            feature_importance = []
+
+        response = {
+            "metrics": {
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1_score": f1s,
+                "roc_auc": roc_data["auc"] if roc_data else None,
+            },
+            "confusion": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
+            "roc": roc_data,
+            "feature_importance": feature_importance,
+            "samples": samples,
+        }
+
+        return response
+
+    except Exception as e:
+        import traceback as _tb
+
+        _tb.print_exc()
+        # Return a 500 with message
+        raise HTTPException(status_code=500, detail=f"Eval metrics error: {str(e)}")
 
 
 if __name__ == "__main__":
