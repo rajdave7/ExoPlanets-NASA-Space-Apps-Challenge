@@ -1,0 +1,13 @@
+# Render service manifest for automatic creation of a web service
+services:
+  - type: web
+    name: exoplanet-backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    branch: master
+    autoDeploy: true
+    region: oregon
+    plan: free
+    envVars:
+      - key: PORT
+        value: "8000"

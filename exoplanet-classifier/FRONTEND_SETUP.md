@@ -18,5 +18,6 @@ npm start
 2. The app will run at http://localhost:3000 by default (ensure backend FastAPI at http://localhost:8000 is running for full functionality).
 
 Notes:
+
 - Tailwind and PostCSS configs were added. If your environment already pins versions, run `npm install` to update the lockfile.
 - The UI changes are purely presentational: fonts, background, and subtle nebula panels.
